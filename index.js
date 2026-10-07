@@ -6,7 +6,7 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// Инициализация Firebase Admin с использованием переменной окружения Railway
+// Инициализация Firebase Admin с использованием переменной окружения из Railway
 try {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   admin.initializeApp({
