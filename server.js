@@ -112,8 +112,8 @@ async function sendTo(uid, msg, diag) {
      «слишком большое» — повторяем короче. */
   const cut = (t, n) => { t = String(t || ''); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
   const variants = [
-    (m) => ({ data: { title: cut(m.title, 80), body: cut(m.body, 240), chatId: String(m.chatId || ''), type: String(m.kind || ''), url: link || '' }, webpush: { headers: { Urgency: 'high', TTL: '86400' } } }),
-    (m) => ({ data: { title: cut(m.title, 40), body: cut(m.body, 80), chatId: String(m.chatId || '') } }),
+    (m) => ({ data: Object.assign({ title: cut(m.title, 80), body: cut(m.body, 240), chatId: String(m.chatId || ''), from: String(m.from || ''), type: String(m.kind || '') }, /^https:\/\//.test(m.icon || '') && String(m.icon).length < 600 ? { icon: String(m.icon) } : {}), webpush: { headers: { Urgency: 'high', TTL: '86400' } } }),
+    (m) => ({ data: { title: cut(m.title, 40), body: cut(m.body, 80), chatId: String(m.chatId || ''), from: String(m.from || '') } }),
     (m) => ({ data: { title: cut(m.title, 24) || 'Chat' } })
   ];
   const isBig = (e) => e && /too large|too big|4K|4096/i.test(e.message || '');
@@ -157,7 +157,7 @@ async function onMessage(me, b) {
     if (uid === me.uid) continue;
     const lvl = (chat.mutedBy || {})[uid];
     if (lvl && lvl !== 'none' && lvl !== 'sound') continue;            /* уведомления в этом чате выключены */
-    sent += await sendTo(uid, { title, body, chatId, kind: 'message', tag: 'chat-' + chatId, silent: lvl === 'sound', icon: chat.isCommunity ? chat.communityAvatarUrl : (meDoc.exists && meDoc.data().avatarUrl && !String(meDoc.data().avatarUrl).startsWith('data:') ? meDoc.data().avatarUrl : undefined) });
+    sent += await sendTo(uid, { title, body, chatId, from: me.uid, kind: 'message', tag: 'chat-' + chatId, silent: lvl === 'sound', icon: chat.isCommunity ? chat.communityAvatarUrl : (meDoc.exists && meDoc.data().avatarUrl && !String(meDoc.data().avatarUrl).startsWith('data:') ? meDoc.data().avatarUrl : undefined) });
   }
   return sent;
 }
@@ -167,7 +167,7 @@ async function onNotify(me, b) {
   const meDoc = await db.collection('users').doc(me.uid).get();
   const name = b.fromName || nameOf(meDoc.exists ? meDoc.data() : null);
   const what = NOTIFY[b.type] || 'новое уведомление';
-  return sendTo(to, { title: name, body: what, kind: String(b.type || 'notify'), tag: 'n-' + (b.type || '') });
+  return sendTo(to, { title: name, body: what, from: me.uid, kind: String(b.type || 'notify'), tag: 'n-' + (b.type || '') });
 }
 async function onCall(me, b) {
   const chatId = String(b.chatId || '');
@@ -178,7 +178,7 @@ async function onCall(me, b) {
   const meDoc = await db.collection('users').doc(me.uid).get();
   const name = nameOf(meDoc.exists ? meDoc.data() : null, (chat.usernames || {})[me.uid]);
   let sent = 0;
-  for (const uid of chat.participants) if (uid !== me.uid) sent += await sendTo(uid, { title: '📞 ' + name, body: 'Входящий звонок', chatId, kind: 'call', tag: 'call-' + chatId });
+  for (const uid of chat.participants) if (uid !== me.uid) sent += await sendTo(uid, { title: '📞 ' + name, body: 'Входящий звонок', chatId, from: me.uid, kind: 'call', tag: 'call-' + chatId });
   return sent;
 }
 async function onTest(me) {
