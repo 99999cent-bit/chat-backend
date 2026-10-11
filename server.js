@@ -13,10 +13,13 @@
      /push/message  {chatId, type, preview}  — новое сообщение
      /push/notify   {toUid, type, fromName}  — лайк, заявка, история…
      /push/call     {chatId}                 — входящий звонок
+     /call/decline  {chatId, dk}             — «Отклонить» прямо в уведомлении (без входа,
+                                               по одноразовому ключу из push о звонке)
      /push/test     {}                       — проверка: push на свои устройства
      /send-push     — то же, что выше (определяется по полям)
 ============================================================ */
 const express = require('express');
+const crypto = require('crypto');
 const admin = require('firebase-admin');
 
 let sa = null, initError = '';
@@ -130,6 +133,8 @@ async function appConfig() {
   cfgAt = Date.now(); return cfgCache;
 }
 
+const strMap = (o) => { const r = {}; if (o) for (const k of Object.keys(o)) if (o[k] != null) r[k] = String(o[k]); return r; };
+
 async function sendTo(uid, msg, diag) {
   diag = diag || {};
   const snap = await db.collection('users').doc(uid).get();
@@ -147,8 +152,8 @@ async function sendTo(uid, msg, diag) {
      «слишком большое» — повторяем короче. */
   const cut = (t, n) => { t = String(t || ''); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
   const variants = [
-    (m) => ({ data: Object.assign({ title: cut(m.title, 80), body: cut(m.body, 240), chatId: String(m.chatId || ''), sender: String(m.from || ''), type: String(m.kind || '') }, /^https:\/\//.test(m.icon || '') && String(m.icon).length < 600 ? { icon: String(m.icon) } : {}), webpush: { headers: { Urgency: 'high', TTL: '86400' } }, android: { priority: 'high', ttl: 86400000 } }),
-    (m) => ({ data: { title: cut(m.title, 40), body: cut(m.body, 80), chatId: String(m.chatId || ''), sender: String(m.from || '') }, android: { priority: 'high' } }),
+    (m) => ({ data: Object.assign({ title: cut(m.title, 80), body: cut(m.body, 240), chatId: String(m.chatId || ''), sender: String(m.from || ''), type: String(m.kind || '') }, /^https:\/\//.test(m.icon || '') && String(m.icon).length < 600 ? { icon: String(m.icon) } : {}, strMap(m.extra)), webpush: { headers: { Urgency: 'high', TTL: '86400' } }, android: { priority: 'high', ttl: 86400000 } }),
+    (m) => ({ data: Object.assign({ title: cut(m.title, 40), body: cut(m.body, 80), chatId: String(m.chatId || ''), sender: String(m.from || ''), type: String(m.kind || '') }, strMap(m.extra)), android: { priority: 'high' } }),
     (m) => ({ data: { title: cut(m.title, 24) || 'Chat' } })
   ];
   const isBig = (e) => e && /too large|too big|4K|4096/i.test(e.message || '');
@@ -205,6 +210,33 @@ async function onNotify(me, b) {
   const what = NOTIFY[b.type] || 'новое уведомление';
   return sendTo(to, { title: name, body: what, from: me.uid, icon: SELF ? SELF + '/avatar/u/' + me.uid : undefined, kind: String(b.type || 'notify'), tag: 'n-' + (b.type || '') });
 }
+/* звонки: ключ для «Отклонить» из уведомления и слежение за звонком,
+   чтобы убрать уведомление, когда звонящий положил трубку */
+const CALLS = new Map();   /* chatId -> {dk, callees, unsub, timer} */
+function stopWatch(chatId) {
+  const w = CALLS.get(chatId); if (!w) return;
+  try { w.unsub && w.unsub(); } catch (e) {}
+  clearTimeout(w.timer);
+}
+function watchCall(chatId, callees, dk) {
+  stopWatch(chatId);
+  const w = { dk, callees, unsub: null, timer: null, done: false, at: Date.now() };
+  CALLS.set(chatId, w);
+  const finish = (status) => {
+    if (w.done) return; w.done = true;
+    try { w.unsub && w.unsub(); } catch (e) {}
+    clearTimeout(w.timer);
+    setTimeout(() => { if (CALLS.get(chatId) === w) CALLS.delete(chatId); }, 5 * 60000);
+    for (const uid of callees) sendTo(uid, { title: '', body: '', chatId, kind: 'call_end', extra: { status: status || 'ended' } }).catch(() => {});
+  };
+  w.timer = setTimeout(() => finish('missed'), 65000);
+  try {
+    w.unsub = db.collection('calls').doc(chatId).onSnapshot((s) => {
+      const st = s.exists ? String((s.data() || {}).status || '') : 'ended';
+      if (st && st !== 'ringing') finish(st);
+    }, () => {});
+  } catch (e) {}
+}
 async function onCall(me, b) {
   const chatId = String(b.chatId || '');
   const c = await db.collection('chats').doc(chatId).get();
@@ -213,10 +245,32 @@ async function onCall(me, b) {
   if (!(chat.participants || []).includes(me.uid)) throw Object.assign(new Error('вы не участник чата'), { status: 403 });
   const meDoc = await db.collection('users').doc(me.uid).get();
   const name = nameOf(meDoc.exists ? meDoc.data() : null, (chat.usernames || {})[me.uid]);
+  let callType = 'audio';
+  try { const cd = await db.collection('calls').doc(chatId).get(); if (cd.exists && cd.data().callType === 'video') callType = 'video'; } catch (e) {}
+  const dk = crypto.randomBytes(12).toString('hex');
+  const callees = chat.participants.filter((u) => u !== me.uid);
+  watchCall(chatId, callees, dk);
+  const extra = { callType, dk, declineUrl: SELF ? SELF + '/call/decline' : '' };
   let sent = 0;
-  for (const uid of chat.participants) if (uid !== me.uid) sent += await sendTo(uid, { title: '📞 ' + name, body: 'Входящий звонок', chatId, from: me.uid, icon: SELF ? SELF + '/avatar/u/' + me.uid : undefined, kind: 'call', tag: 'call-' + chatId });
+  for (const uid of callees) sent += await sendTo(uid, { title: (callType === 'video' ? '📹 ' : '📞 ') + name, body: callType === 'video' ? 'Входящий видеозвонок' : 'Входящий аудиозвонок', chatId, from: me.uid, icon: SELF ? SELF + '/avatar/u/' + me.uid : undefined, kind: 'call', tag: 'call-' + chatId, extra });
   return sent;
 }
+/* «Отклонить» в уведомлении о звонке */
+app.post('/call/decline', async (req, res) => {
+  try {
+    const chatId = String((req.body || {}).chatId || ''), dk = String((req.body || {}).dk || '');
+    const w = CALLS.get(chatId);
+    if (!db || !w || !dk || w.dk !== dk) return res.status(403).json({ ok: false });
+    const ref = db.collection('calls').doc(chatId);
+    const ok = await db.runTransaction(async (tx) => {
+      const s = await tx.get(ref);
+      if (!s.exists || s.data().status !== 'ringing') return false;
+      tx.update(ref, { status: 'declined', endedAt: Date.now() });
+      return true;
+    });
+    res.json({ ok });
+  } catch (e) { console.error('decline', e.message); res.status(500).json({ ok: false }); }
+});
 async function onTest(me) {
   const d = {};
   const sent = await sendTo(me.uid, { title: '✅ Push работает', body: 'Так будут приходить уведомления, когда приложение закрыто', kind: 'test', tag: 'test' }, d);
