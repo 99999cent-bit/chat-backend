@@ -96,20 +96,22 @@ const NOTIFY = {
 };
 
 /* разослать на все устройства человека; мёртвые токены убрать */
-async function sendTo(uid, msg) {
+async function sendTo(uid, msg, diag) {
+  diag = diag || {};
   const snap = await db.collection('users').doc(uid).get();
-  if (!snap.exists) return 0;
+  if (!snap.exists) { diag.reason = 'нет профиля пользователя в базе'; return 0; }
   const u = snap.data();
-  if (u.notificationsEnabled === false) return 0;
+  if (u.notificationsEnabled === false) { diag.reason = 'в настройках профиля уведомления выключены'; return 0; }
   const tokens = Array.from(new Set((u.fcmTokens || []).filter(Boolean)));
-  if (!tokens.length) return 0;
+  diag.tokens = tokens.length;
+  if (!tokens.length) { diag.reason = 'в профиле нет ни одного устройства (fcmTokens пуст)'; return 0; }
   const link = APP_URL ? APP_URL + (msg.chatId ? (APP_URL.includes('?') ? '&' : '?') + 'chat=' + encodeURIComponent(msg.chatId) : '') : undefined;
   const data = Object.fromEntries(Object.entries({ chatId: msg.chatId || '', type: msg.kind || '', url: link || '' }).map(([k, v]) => [k, String(v)]));
   const r = await admin.messaging().sendEachForMulticast({
     tokens,
     data: Object.assign({ title: msg.title, body: msg.body }, data),
     webpush: {
-      notification: { title: msg.title, body: msg.body, icon: msg.icon || undefined, tag: msg.tag || undefined, renotify: true, silent: !!msg.silent },
+      notification: JSON.parse(JSON.stringify({ title: msg.title, body: msg.body, icon: msg.icon || undefined, tag: msg.tag || undefined, renotify: !!msg.tag, silent: !!msg.silent })),
       fcmOptions: link ? { link } : undefined,
       headers: { Urgency: 'high', TTL: '86400' }
     },
@@ -118,8 +120,10 @@ async function sendTo(uid, msg) {
   const dead = [];
   r.responses.forEach((x, i) => {
     const c = x.error && x.error.code;
-    if (c === 'messaging/registration-token-not-registered' || c === 'messaging/invalid-registration-token' || c === 'messaging/invalid-argument') dead.push(tokens[i]);
+    if (x.error) { console.error('push error', c, x.error.message); (diag.errors = diag.errors || []).push((c || 'error') + ': ' + x.error.message); }
+    if (c === 'messaging/registration-token-not-registered' || c === 'messaging/invalid-registration-token') dead.push(tokens[i]);
   });
+  diag.removed = dead.length;
   if (dead.length) await db.collection('users').doc(uid).update({ fcmTokens: admin.firestore.FieldValue.arrayRemove(...dead) }).catch(() => {});
   return r.successCount;
 }
@@ -167,7 +171,9 @@ async function onCall(me, b) {
   return sent;
 }
 async function onTest(me) {
-  return sendTo(me.uid, { title: '✅ Push работает', body: 'Так будут приходить уведомления, когда приложение закрыто', kind: 'test', tag: 'test' });
+  const d = {};
+  const sent = await sendTo(me.uid, { title: '✅ Push работает', body: 'Так будут приходить уведомления, когда приложение закрыто', kind: 'test', tag: 'test' }, d);
+  return Object.assign({ sent }, d);
 }
 
 function route(fn) {
@@ -175,8 +181,8 @@ function route(fn) {
     try {
       if (!db) return res.status(500).json({ ok: false, error: initError || 'на сервере не задан FIREBASE_SERVICE_ACCOUNT' });
       const me = await who(req);
-      const sent = await fn(me, req.body || {});
-      res.json({ ok: true, sent });
+      const out = await fn(me, req.body || {});
+      res.json(out && typeof out === 'object' ? Object.assign({ ok: true }, out) : { ok: true, sent: out });
     } catch (e) {
       console.error(req.path, e.message);
       res.status(e.status || 500).json({ ok: false, error: e.message });
