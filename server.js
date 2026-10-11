@@ -22,16 +22,40 @@ const admin = require('firebase-admin');
 let sa = null, initError = '';
 process.on('uncaughtException', (e) => console.error('uncaught:', e && e.stack || e));
 process.on('unhandledRejection', (e) => console.error('unhandled:', e && e.stack || e));
-try {
+/* Ключ разбираем «с запасом»: даже если при копировании на телефоне json
+   испортился (лишний перенос строки, кавычка, пробел), достаём из текста
+   три нужных поля и собираем ключ заново. */
+function pick(raw, name) {
+  const m = new RegExp('"?' + name + '"?\\s*:\\s*"([^"]+)"').exec(raw);
+  return m ? m[1].trim() : '';
+}
+function rebuildPem(raw) {
+  const m = /-----BEGIN PRIVATE KEY-----([\s\S]*?)-----END PRIVATE KEY-----/.exec(raw);
+  if (!m) return '';
+  const body = m[1].replace(/\\\\n|\\n|\\r/g, '').replace(/[^A-Za-z0-9+/=]/g, '');
+  return '-----BEGIN PRIVATE KEY-----\n' + body.replace(/(.{64})/g, '$1\n').replace(/\n$/, '') + '\n-----END PRIVATE KEY-----\n';
+}
+function readKey() {
   let raw = String(process.env.FIREBASE_SERVICE_ACCOUNT || '').trim();
   if (/^['"`]/.test(raw) && raw.slice(-1) === raw[0]) raw = raw.slice(1, -1).trim();   /* лишние кавычки вокруг */
-  if (raw && raw[0] !== '{') { try { raw = Buffer.from(raw, 'base64').toString('utf8'); } catch (e) {} }  /* ключ в base64 */
-  if (!raw) initError = 'Не задана переменная FIREBASE_SERVICE_ACCOUNT';
-  else {
-    sa = JSON.parse(raw);
-    if (sa.private_key) sa.private_key = String(sa.private_key).replace(/\\n/g, '\n');
-    admin.initializeApp({ credential: admin.credential.cert(sa) });
-  }
+  if (raw && raw.indexOf('{') < 0 && raw.indexOf('PRIVATE KEY') < 0) { try { raw = Buffer.from(raw, 'base64').toString('utf8'); } catch (e) {} }  /* ключ в base64 */
+  /* вариант с тремя отдельными переменными */
+  const envKey = process.env.FIREBASE_PRIVATE_KEY || '';
+  if (!raw && !envKey) throw new Error('Не задана переменная FIREBASE_SERVICE_ACCOUNT');
+  let j = null;
+  try { j = JSON.parse(raw); } catch (e) { j = null; }
+  const project_id = (j && j.project_id) || process.env.FIREBASE_PROJECT_ID || pick(raw, 'project_id');
+  const client_email = (j && j.client_email) || process.env.FIREBASE_CLIENT_EMAIL || pick(raw, 'client_email');
+  const private_key = rebuildPem((j && j.private_key) || envKey || raw);
+  if (!project_id) throw new Error('в ключе не найден project_id');
+  if (!client_email) throw new Error('в ключе не найден client_email');
+  if (!private_key) throw new Error('в ключе не найден private_key (BEGIN/END PRIVATE KEY)');
+  if (!j) console.log('json ключа повреждён, собран заново из полей');
+  return { project_id, client_email, private_key };
+}
+try {
+  sa = readKey();
+  admin.initializeApp({ credential: admin.credential.cert({ projectId: sa.project_id, clientEmail: sa.client_email, privateKey: sa.private_key }) });
 } catch (e) { sa = null; initError = 'Ключ FIREBASE_SERVICE_ACCOUNT не подходит: ' + e.message; console.error(initError); }
 const db = sa ? admin.firestore() : null;
 const APP_URL = (process.env.APP_URL || '').trim();
