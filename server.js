@@ -65,6 +65,40 @@ const APP_URL = (process.env.APP_URL || '').trim();
 let SELF = '';   /* адрес этого сервера (для ссылок на аватарки) */
 
 const app = express();
+/* посредник для ИИ (расшифровка голосовых, перевод): из России адрес ИИ-сервера бывает
+   недоступен без VPN — приложение может отправить запрос сюда, а сервер перешлёт его дальше.
+   Пересылает только на адрес из настроек приложения (config/app.aiEndpoint) и только вошедшим. */
+app.use('/ai', (req, res, next) => {
+  res.set('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.set('Vary', 'Origin');
+  res.set('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
+app.use('/ai', express.raw({ type: () => true, limit: '40mb' }), async (req, res) => {
+  try {
+    if (!db) return res.status(500).json({ error: 'server_not_configured' });
+    await who(req);
+    const cfg = await appConfig();
+    const target = String(cfg.aiEndpoint || '').trim().replace(/\/+$/, '');
+    if (!/^https:\/\//.test(target)) return res.status(503).json({ error: 'not_configured' });
+    if (target.replace(/^https:\/\//, '').split('/')[0] === String(req.get('host') || '')) return res.status(508).json({ error: 'loop' });
+    const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 120000);
+    const r = await fetch(target + req.url, {
+      method: req.method,
+      headers: { 'Content-Type': req.get('content-type') || 'application/json', Authorization: req.get('authorization') || '' },
+      body: req.method === 'GET' || req.method === 'HEAD' ? undefined : req.body,
+      signal: ac.signal
+    }).finally(() => clearTimeout(t));
+    res.status(r.status);
+    const ct = r.headers.get('content-type'); if (ct) res.set('Content-Type', ct);
+    res.send(Buffer.from(await r.arrayBuffer()));
+  } catch (e) {
+    console.error('ai proxy', e.message);
+    res.status(e.status || 502).json({ error: e.status === 401 ? 'unauthorized' : 'network' });
+  }
+});
 app.use(express.json({ limit: '200kb' }));
 /* разрешаем запросы из приложения (браузер/APK) */
 app.use((req, res, next) => {
