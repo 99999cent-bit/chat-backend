@@ -147,8 +147,8 @@ async function sendTo(uid, msg, diag) {
      «слишком большое» — повторяем короче. */
   const cut = (t, n) => { t = String(t || ''); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
   const variants = [
-    (m) => ({ data: Object.assign({ title: cut(m.title, 80), body: cut(m.body, 240), chatId: String(m.chatId || ''), sender: String(m.from || ''), type: String(m.kind || '') }, /^https:\/\//.test(m.icon || '') && String(m.icon).length < 600 ? { icon: String(m.icon) } : {}), webpush: { headers: { Urgency: 'high', TTL: '86400' } } }),
-    (m) => ({ data: { title: cut(m.title, 40), body: cut(m.body, 80), chatId: String(m.chatId || ''), sender: String(m.from || '') } }),
+    (m) => ({ data: Object.assign({ title: cut(m.title, 80), body: cut(m.body, 240), chatId: String(m.chatId || ''), sender: String(m.from || ''), type: String(m.kind || '') }, /^https:\/\//.test(m.icon || '') && String(m.icon).length < 600 ? { icon: String(m.icon) } : {}), webpush: { headers: { Urgency: 'high', TTL: '86400' } }, android: { priority: 'high', ttl: 86400000 } }),
+    (m) => ({ data: { title: cut(m.title, 40), body: cut(m.body, 80), chatId: String(m.chatId || ''), sender: String(m.from || '') }, android: { priority: 'high' } }),
     (m) => ({ data: { title: cut(m.title, 24) || 'Chat' } })
   ];
   const isBig = (e) => e && /too large|too big|4K|4096/i.test(e.message || '');
