@@ -106,17 +106,28 @@ async function sendTo(uid, msg, diag) {
   diag.tokens = tokens.length;
   if (!tokens.length) { diag.reason = 'в профиле нет ни одного устройства (fcmTokens пуст)'; return 0; }
   const link = APP_URL ? APP_URL + (msg.chatId ? (APP_URL.includes('?') ? '&' : '?') + 'chat=' + encodeURIComponent(msg.chatId) : '') : undefined;
-  const data = Object.fromEntries(Object.entries({ chatId: msg.chatId || '', type: msg.kind || '', url: link || '' }).map(([k, v]) => [k, String(v)]));
-  const r = await admin.messaging().sendEachForMulticast({
-    tokens,
-    data: Object.assign({ title: msg.title, body: msg.body }, data),
-    webpush: {
-      notification: JSON.parse(JSON.stringify({ title: msg.title, body: msg.body, icon: msg.icon || undefined, tag: msg.tag || undefined, renotify: !!msg.tag, silent: !!msg.silent })),
-      fcmOptions: link ? { link } : undefined,
-      headers: { Urgency: 'high', TTL: '86400' }
-    },
-    android: { priority: 'high' }
-  });
+  /* Шлём «только данные» — уведомление рисует firebase-messaging-sw.js.
+     Так сообщение получается в 2–3 раза меньше: некоторые браузеры
+     (например, Яндекс) принимают совсем маленькие push. Если всё же
+     «слишком большое» — повторяем короче. */
+  const cut = (t, n) => { t = String(t || ''); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
+  const variants = [
+    (m) => ({ data: { title: cut(m.title, 80), body: cut(m.body, 240), chatId: String(m.chatId || ''), type: String(m.kind || ''), url: link || '' }, webpush: { headers: { Urgency: 'high', TTL: '86400' } } }),
+    (m) => ({ data: { title: cut(m.title, 40), body: cut(m.body, 80), chatId: String(m.chatId || '') } }),
+    (m) => ({ data: { title: cut(m.title, 24) || 'Chat' } })
+  ];
+  const isBig = (e) => e && /too large|too big|4K|4096/i.test(e.message || '');
+  const results = new Array(tokens.length).fill(null);
+  let left = tokens.map((t, i) => i);
+  for (let v = 0; v < variants.length && left.length; v++) {
+    const body = variants[v](msg);
+    const r0 = await admin.messaging().sendEachForMulticast(Object.assign({ tokens: left.map(i => tokens[i]) }, body));
+    const again = [];
+    r0.responses.forEach((x, k) => { const i = left[k]; results[i] = x; if (!x.success && isBig(x.error) && v < variants.length - 1) again.push(i); });
+    if (again.length) (diag.retries = diag.retries || []).push('вариант ' + (v + 1) + ' (' + Buffer.byteLength(JSON.stringify(body)) + ' байт) слишком большой');
+    left = again;
+  }
+  const r = { successCount: results.filter(x => x && x.success).length, responses: results };
   const dead = [];
   r.responses.forEach((x, i) => {
     const c = x.error && x.error.code;
