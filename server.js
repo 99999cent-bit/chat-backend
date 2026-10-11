@@ -59,6 +59,7 @@ try {
 } catch (e) { sa = null; initError = 'Ключ FIREBASE_SERVICE_ACCOUNT не подходит: ' + e.message; console.error(initError); }
 const db = sa ? admin.firestore() : null;
 const APP_URL = (process.env.APP_URL || '').trim();
+let SELF = '';   /* адрес этого сервера (для ссылок на аватарки) */
 
 const app = express();
 app.use(express.json({ limit: '200kb' }));
@@ -71,6 +72,31 @@ app.use((req, res, next) => {
   res.set('Access-Control-Max-Age', '86400');
   if (req.method === 'OPTIONS') return res.status(204).end();
   next();
+});
+
+/* аватарки для уведомлений: в базе они хранятся картинкой внутри текста (data:),
+   а уведомлению нужна обычная ссылка — отдаём картинку по короткому адресу */
+const avCache = new Map();
+async function avatarOf(kind, id) {
+  const key = kind + ':' + id, hit = avCache.get(key);
+  if (hit && Date.now() - hit.at < 10 * 60000) return hit.v;
+  let v = '';
+  try {
+    if (kind === 'u') { const d = await db.collection('users').doc(id).get(); v = d.exists ? (d.data().avatarUrl || '') : ''; }
+    else { const d = await db.collection('chats').doc(id).get(); v = d.exists ? (d.data().communityAvatarUrl || '') : ''; }
+  } catch (e) {}
+  avCache.set(key, { v, at: Date.now() }); if (avCache.size > 500) avCache.clear();
+  return v;
+}
+app.get('/avatar/:kind/:id', async (req, res) => {
+  try {
+    if (!db || !/^[uc]$/.test(req.params.kind) || !/^[\w-]{1,128}$/.test(req.params.id)) return res.status(404).end();
+    const v = await avatarOf(req.params.kind, req.params.id);
+    const m = /^data:(image\/[\w.+-]+);base64,(.+)$/.exec(v);
+    if (m) { res.set('Cache-Control', 'public, max-age=3600'); return res.type(m[1]).send(Buffer.from(m[2], 'base64')); }
+    if (/^https:\/\//.test(v)) return res.redirect(302, v);
+    res.status(404).end();
+  } catch (e) { res.status(500).end(); }
 });
 
 app.get('/', (req, res) => res.json({ ok: true, service: 'chat push', firebase: !!sa, error: initError || undefined }));
@@ -96,12 +122,21 @@ const NOTIFY = {
 };
 
 /* разослать на все устройства человека; мёртвые токены убрать */
+/* настройки приложения (config/app), кэш на минуту */
+let cfgCache = null, cfgAt = 0;
+async function appConfig() {
+  if (cfgCache && Date.now() - cfgAt < 60000) return cfgCache;
+  try { const d = await db.collection('config').doc('app').get(); cfgCache = d.exists ? d.data() : {}; } catch (e) { cfgCache = cfgCache || {}; }
+  cfgAt = Date.now(); return cfgCache;
+}
+
 async function sendTo(uid, msg, diag) {
   diag = diag || {};
   const snap = await db.collection('users').doc(uid).get();
   if (!snap.exists) { diag.reason = 'нет профиля пользователя в базе'; return 0; }
   const u = snap.data();
   if (u.notificationsEnabled === false) { diag.reason = 'в настройках профиля уведомления выключены'; return 0; }
+  if (!u.isAdmin && (await appConfig()).pushEnabled === false) { diag.reason = 'push у пользователей выключены в админке (вкладка «Оповещения»)'; return 0; }
   const tokens = Array.from(new Set((u.fcmTokens || []).filter(Boolean)));
   diag.tokens = tokens.length;
   if (!tokens.length) { diag.reason = 'в профиле нет ни одного устройства (fcmTokens пуст)'; return 0; }
@@ -158,7 +193,7 @@ async function onMessage(me, b) {
     if (uid === me.uid) continue;
     const lvl = (chat.mutedBy || {})[uid];
     if (lvl && lvl !== 'none' && lvl !== 'sound') continue;            /* уведомления в этом чате выключены */
-    sent += await sendTo(uid, { title, body, chatId, from: me.uid, kind: 'message', tag: 'chat-' + chatId, silent: lvl === 'sound', icon: chat.isCommunity ? chat.communityAvatarUrl : (meDoc.exists && meDoc.data().avatarUrl && !String(meDoc.data().avatarUrl).startsWith('data:') ? meDoc.data().avatarUrl : undefined) });
+    sent += await sendTo(uid, { title, body, chatId, from: me.uid, kind: 'message', tag: 'chat-' + chatId, silent: lvl === 'sound', icon: SELF ? SELF + (chat.isCommunity ? '/avatar/c/' + chatId : '/avatar/u/' + me.uid) : undefined });
   }
   return sent;
 }
@@ -168,7 +203,7 @@ async function onNotify(me, b) {
   const meDoc = await db.collection('users').doc(me.uid).get();
   const name = b.fromName || nameOf(meDoc.exists ? meDoc.data() : null);
   const what = NOTIFY[b.type] || 'новое уведомление';
-  return sendTo(to, { title: name, body: what, from: me.uid, kind: String(b.type || 'notify'), tag: 'n-' + (b.type || '') });
+  return sendTo(to, { title: name, body: what, from: me.uid, icon: SELF ? SELF + '/avatar/u/' + me.uid : undefined, kind: String(b.type || 'notify'), tag: 'n-' + (b.type || '') });
 }
 async function onCall(me, b) {
   const chatId = String(b.chatId || '');
@@ -179,7 +214,7 @@ async function onCall(me, b) {
   const meDoc = await db.collection('users').doc(me.uid).get();
   const name = nameOf(meDoc.exists ? meDoc.data() : null, (chat.usernames || {})[me.uid]);
   let sent = 0;
-  for (const uid of chat.participants) if (uid !== me.uid) sent += await sendTo(uid, { title: '📞 ' + name, body: 'Входящий звонок', chatId, from: me.uid, kind: 'call', tag: 'call-' + chatId });
+  for (const uid of chat.participants) if (uid !== me.uid) sent += await sendTo(uid, { title: '📞 ' + name, body: 'Входящий звонок', chatId, from: me.uid, icon: SELF ? SELF + '/avatar/u/' + me.uid : undefined, kind: 'call', tag: 'call-' + chatId });
   return sent;
 }
 async function onTest(me) {
@@ -192,6 +227,7 @@ function route(fn) {
   return async (req, res) => {
     try {
       if (!db) return res.status(500).json({ ok: false, error: initError || 'на сервере не задан FIREBASE_SERVICE_ACCOUNT' });
+      SELF = 'https://' + (req.get('x-forwarded-host') || req.get('host'));
       const me = await who(req);
       const out = await fn(me, req.body || {});
       res.json(out && typeof out === 'object' ? Object.assign({ ok: true }, out) : { ok: true, sent: out });
