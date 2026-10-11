@@ -112,8 +112,8 @@ async function sendTo(uid, msg, diag) {
      «слишком большое» — повторяем короче. */
   const cut = (t, n) => { t = String(t || ''); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
   const variants = [
-    (m) => ({ data: Object.assign({ title: cut(m.title, 80), body: cut(m.body, 240), chatId: String(m.chatId || ''), from: String(m.from || ''), type: String(m.kind || '') }, /^https:\/\//.test(m.icon || '') && String(m.icon).length < 600 ? { icon: String(m.icon) } : {}), webpush: { headers: { Urgency: 'high', TTL: '86400' } } }),
-    (m) => ({ data: { title: cut(m.title, 40), body: cut(m.body, 80), chatId: String(m.chatId || ''), from: String(m.from || '') } }),
+    (m) => ({ data: Object.assign({ title: cut(m.title, 80), body: cut(m.body, 240), chatId: String(m.chatId || ''), sender: String(m.from || ''), type: String(m.kind || '') }, /^https:\/\//.test(m.icon || '') && String(m.icon).length < 600 ? { icon: String(m.icon) } : {}), webpush: { headers: { Urgency: 'high', TTL: '86400' } } }),
+    (m) => ({ data: { title: cut(m.title, 40), body: cut(m.body, 80), chatId: String(m.chatId || ''), sender: String(m.from || '') } }),
     (m) => ({ data: { title: cut(m.title, 24) || 'Chat' } })
   ];
   const isBig = (e) => e && /too large|too big|4K|4096/i.test(e.message || '');
@@ -121,6 +121,7 @@ async function sendTo(uid, msg, diag) {
   let left = tokens.map((t, i) => i);
   for (let v = 0; v < variants.length && left.length; v++) {
     const body = variants[v](msg);
+    if (body.data) for (const k of Object.keys(body.data)) if (/^(from|notification|message_type|collapse_key)$|^(google|gcm)/i.test(k)) delete body.data[k];   /* зарезервированные Firebase ключи */
     const r0 = await admin.messaging().sendEachForMulticast(Object.assign({ tokens: left.map(i => tokens[i]) }, body));
     const again = [];
     r0.responses.forEach((x, k) => { const i = left[k]; results[i] = x; if (!x.success && isBig(x.error) && v < variants.length - 1) again.push(i); });
