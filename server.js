@@ -6,7 +6,7 @@
      FIREBASE_SERVICE_ACCOUNT — ВСЁ содержимое json-ключа
          (Firebase Console → Настройки проекта → Сервисные аккаунты →
           «Создать закрытый ключ»)
-     APP_URL — адрес приложения, например https://99999cent-bit.github.io/
+     APP_URL — адрес приложения, например https://99999cent-bit.github.io/Timer75rus/
          (куда открывать по нажатию на уведомление)
 
    Маршруты (все POST, с заголовком Authorization: Bearer <вход Firebase>):
@@ -19,10 +19,20 @@
 const express = require('express');
 const admin = require('firebase-admin');
 
-let sa = null;
-try { sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || ''); } catch (e) {}
-if (sa && sa.private_key) sa.private_key = String(sa.private_key).replace(/\\n/g, '\n');
-if (sa) admin.initializeApp({ credential: admin.credential.cert(sa) });
+let sa = null, initError = '';
+process.on('uncaughtException', (e) => console.error('uncaught:', e && e.stack || e));
+process.on('unhandledRejection', (e) => console.error('unhandled:', e && e.stack || e));
+try {
+  let raw = String(process.env.FIREBASE_SERVICE_ACCOUNT || '').trim();
+  if (/^['"`]/.test(raw) && raw.slice(-1) === raw[0]) raw = raw.slice(1, -1).trim();   /* лишние кавычки вокруг */
+  if (raw && raw[0] !== '{') { try { raw = Buffer.from(raw, 'base64').toString('utf8'); } catch (e) {} }  /* ключ в base64 */
+  if (!raw) initError = 'Не задана переменная FIREBASE_SERVICE_ACCOUNT';
+  else {
+    sa = JSON.parse(raw);
+    if (sa.private_key) sa.private_key = String(sa.private_key).replace(/\\n/g, '\n');
+    admin.initializeApp({ credential: admin.credential.cert(sa) });
+  }
+} catch (e) { sa = null; initError = 'Ключ FIREBASE_SERVICE_ACCOUNT не подходит: ' + e.message; console.error(initError); }
 const db = sa ? admin.firestore() : null;
 const APP_URL = (process.env.APP_URL || '').trim();
 
@@ -39,7 +49,7 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/', (req, res) => res.json({ ok: true, service: 'chat push', firebase: !!sa }));
+app.get('/', (req, res) => res.json({ ok: true, service: 'chat push', firebase: !!sa, error: initError || undefined }));
 
 async function who(req) {
   const h = req.headers.authorization || '';
@@ -139,7 +149,7 @@ async function onTest(me) {
 function route(fn) {
   return async (req, res) => {
     try {
-      if (!db) return res.status(500).json({ ok: false, error: 'на сервере не задан FIREBASE_SERVICE_ACCOUNT' });
+      if (!db) return res.status(500).json({ ok: false, error: initError || 'на сервере не задан FIREBASE_SERVICE_ACCOUNT' });
       const me = await who(req);
       const sent = await fn(me, req.body || {});
       res.json({ ok: true, sent });
@@ -155,4 +165,5 @@ app.post('/push/call', route(onCall));
 app.post('/push/test', route(onTest));
 app.post('/send-push', route((me, b) => b.test ? onTest(me) : b.toUid ? onNotify(me, b) : b.call ? onCall(me, b) : onMessage(me, b)));
 
-app.listen(process.env.PORT || 3000, () => console.log('push server on', process.env.PORT || 3000));
+const PORT = +process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => console.log('push server on port', PORT, sa ? '(firebase ok)' : '(' + initError + ')'));
