@@ -136,7 +136,7 @@ app.get('/avatar/:kind/:id', async (req, res) => {
   } catch (e) { res.status(500).end(); }
 });
 
-app.get('/', (req, res) => res.json({ ok: true, service: 'chat push', firebase: !!sa, error: initError || undefined }));
+app.get('/', (req, res) => res.json({ ok: true, service: 'chat push', firebase: !!sa, reminders: true, error: initError || undefined }));
 
 async function who(req) {
   const h = req.headers.authorization || '';
@@ -330,6 +330,9 @@ app.post('/push/notify', route(onNotify));
 app.post('/push/call', route(onCall));
 app.post('/push/test', route(onTest));
 app.post('/send-push', route((me, b) => b.test ? onTest(me) : b.toUid ? onNotify(me, b) : b.call ? onCall(me, b) : onMessage(me, b)));
+
+/* напоминания календаря и займов при закрытом приложении (см. reminders.js) */
+if (db) require('./reminders')({ app, db, admin, route, sendTo, onMessage, appConfig, nameOf });
 
 const PORT = +process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log('push server on port', PORT, sa ? '(firebase ok)' : '(' + initError + ')'));
