@@ -62,6 +62,7 @@ module.exports = function setupReminders(ctx) {
     const ref = db.collection('chats').doc(chatId);
     const [meS, toS, chatS, cfg] = await Promise.all([db.collection('users').doc(uid).get(), db.collection('users').doc(to).get(), ref.get(), appConfig()]);
     const me = meS.exists ? meS.data() : {}, other = toS.exists ? toS.data() : {}, now = Date.now();
+    if (me.blocked === true) return 0;          /* заблокированный администратором аккаунт писать не может (как в правилах Firestore) */
     if (!chatS.exists) {
       await ref.set({
         id: chatId, participants: [uid, to],
