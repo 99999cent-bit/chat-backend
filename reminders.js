@@ -47,7 +47,7 @@ module.exports = function setupReminders(ctx) {
       const fresh = {};
       Object.keys(sent).forEach((k) => { if (now - sent[k] < KEEP_SENT_MS) fresh[k] = sent[k]; });
       sentKeys = Object.keys(fresh).slice(-200);
-      tx.set(ref, { items: keep, sent: fresh, nextAt: nextAtOf(keep), updatedAt: now });
+      tx.set(ref, { items: keep, sent: fresh, nextAt: nextAtOf(keep), updatedAt: now, lastPush: s.exists ? (s.data().lastPush || null) : null });   /* итог последней отправки не теряем */
     });
     let tokens = 0;
     try { const u = await db.collection('users').doc(me.uid).get(); tokens = u.exists ? (u.data().fcmTokens || []).filter(Boolean).length : 0; } catch (e) {}
@@ -101,12 +101,15 @@ module.exports = function setupReminders(ctx) {
       tx.update(ref, { items: rest, sent: fresh, nextAt: nextAtOf(rest) });
       return hit;
     });
+    let last = null;
     for (const it of due) {
       if (now - it.at > LATE_MS) continue;
       if (it.loan) { try { await loanChatMessage(uid, it.loan); } catch (e) { console.error('loan message', uid, e.message); } }
-      try { await sendTo(uid, { title: it.title, body: it.text, kind: 'rem-' + it.key, tag: 'rem-' + it.key, extra: { target: it.target } }); }
-      catch (e) { console.error('reminder push', uid, e.message); }
+      const diag = {};
+      try { last = { at: Date.now(), title: it.title.slice(0, 60), sent: await sendTo(uid, { title: it.title, body: it.text, kind: 'rem-' + it.key, tag: 'rem-' + it.key, extra: { target: it.target } }, diag), reason: diag.reason || '', errors: (diag.errors || []).slice(0, 2) }; }
+      catch (e) { console.error('reminder push', uid, e.message); last = { at: Date.now(), title: it.title.slice(0, 60), sent: 0, reason: 'ошибка отправки: ' + e.message, errors: [] }; }
     }
+    if (last) { try { await ref.update({ lastPush: last }); } catch (e) {} }      /* для окна «Проверка напоминаний» */
     return due.length;
   }
 
@@ -122,8 +125,29 @@ module.exports = function setupReminders(ctx) {
     return n;
   }
 
+  /* «Проверить push с сервера»: сразу шлёт проверочное уведомление на устройства пользователя — тем же способом, что сообщения */
+  async function onTest(me) {
+    const diag = {};
+    const sent = await sendTo(me.uid, {
+      title: '🔔 Проверка push-напоминаний',
+      body: 'Если вы это видите — напоминания с сервера доходят, как сообщения. Нажмите, чтобы проверить переход.',
+      kind: 'rem-test:' + Date.now(), extra: { target: 'diag:test' }
+    }, diag);
+    return { sent, tokens: diag.tokens || 0, reason: diag.reason || '', errors: diag.errors || [] };
+  }
+  /* что сейчас лежит в очереди этого пользователя */
+  async function onStatus(me) {
+    const s = await queue().doc(me.uid).get(), d = s.exists ? s.data() : {}, items = d.items || [], sent = d.sent || {};
+    let next = null;
+    items.forEach((it) => { if (!next || it.at < next.at) next = it; });
+    const times = Object.keys(sent).map((k) => +sent[k]).filter((t) => t > 0);
+    return { queued: items.length, next: next ? next.at : 0, nextTitle: next ? next.title : '', sentCount: times.length, lastSent: times.length ? Math.max.apply(null, times) : 0, updatedAt: d.updatedAt || 0, lastPush: d.lastPush || null };
+  }
+
   app.post('/reminders/sync', route(onSync));
+  app.post('/reminders/test', route(onTest));
+  app.post('/reminders/status', route(onStatus));
   setInterval(tick, 20000);
   setTimeout(tick, 10000);
-  return { onSync, tick, processUser, loanChatMessage, clean };
+  return { onSync, onTest, onStatus, tick, processUser, loanChatMessage, clean };
 };
